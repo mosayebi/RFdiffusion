@@ -360,7 +360,7 @@ class Denoise:
         px0_[~atom_mask] = float("nan")
         return torch.Tensor(px0_)
 
-    def get_potential_gradients(self, xyz, diffusion_mask):
+    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=100.0):
         """
         This could be moved into potential manager if desired - NRB
 
@@ -398,8 +398,12 @@ class Denoise:
 
         # check for NaN's
         if torch.isnan(Ca_grads).any():
-            print("WARNING: NaN in potential gradients, replacing with zero grad.")
+            self._log.info("WARNING: NaN in potential gradients, replacing with zero grad.")
             Ca_grads[:] = 0
+
+        self._log.info(f"\nguiding potential |grad|_max = {Ca_grads.abs().max().item()}.")
+        if clip_grad:
+            Ca_grads.clamp_(min=-clip_grad, max=clip_grad)
 
         return Ca_grads
 

@@ -2,6 +2,8 @@ import torch
 from rfdiffusion.potentials import potentials as potentials
 import numpy as np 
 
+import logging
+log = logging.getLogger(__name__)
 
 def make_contact_matrix(nchain, intra_all=False, inter_all=False, contact_string=None):
     """
@@ -134,7 +136,7 @@ class PotentialManager:
         setting_dict = {entry.split(':')[0]:entry.split(':')[1] for entry in potstr.split(',')}
 
         for key in setting_dict:
-            if not key == 'type': setting_dict[key] = float(setting_dict[key])
+            if not key in ['type', 'profile_csv']: setting_dict[key] = float(setting_dict[key])
 
         return setting_dict
 
@@ -162,7 +164,6 @@ class PotentialManager:
                 contact_matrix = make_contact_matrix(**contact_kwargs)
                 kwargs.update({'contact_matrix':contact_matrix})
 
-
             to_apply.append(potentials.implemented_potentials[potential_dict['type']](**kwargs))
 
         return to_apply
@@ -174,11 +175,11 @@ class PotentialManager:
 
         potential_list = [potential.compute(xyz) for potential in self.potentials_to_apply]
         potential_stack = torch.stack(potential_list, dim=0)
-
+        log.info(f"potentail_stack={potential_stack.detach().numpy()}")
         return torch.sum(potential_stack, dim=0)
 
     def get_guide_scale(self, t):
-        '''
+        '''"
         Given a timestep and a decay type, get the appropriate scale factor to use for applying guiding potentials
         
         Inputs:
