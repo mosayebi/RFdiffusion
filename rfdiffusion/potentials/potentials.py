@@ -572,7 +572,8 @@ class z_profile(Potential):
     def compute(self, xyz):
         coords = xyz[:, 1].contiguous()
         current_profile = self.get_z_profile(coords, z=self.target_profile[:, 0])
-        pot = -((current_profile[:, 1:] - self.target_profile[:, 1:]) ** 2).sum()
+        idx = current_profile[:,1]>0
+        pot = -((current_profile[idx, 1:] - self.target_profile[idx, 1:]) ** 2).sum()
         if self.verbose:
             log.info(f"z_profile guiding potential: " f"potential={pot.item():.2g}")
         return self.weight * pot
