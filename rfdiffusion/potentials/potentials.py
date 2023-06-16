@@ -523,7 +523,7 @@ def get_z_profile(coords, z=None, steps=40):
         z = torch.linspace(coords[:, 2].min() - 0.1, coords[:, 2].max() + 0.1, steps)
     # bucketize coords according to their z values.
     # bin_idxs can have at most z.shape[0]+1 unique numbers
-    bin_idxs = torch.bucketize(coords[:, 2], boundaries=z)
+    bin_idxs = torch.bucketize(coords[:, 2], boundaries=z, right=True)
     r = (coords[:, :2] * coords[:, :2]).sum(1).sqrt()
     rmin = torch.zeros(z.shape[0] + 1).scatter_reduce(
         dim=0, src=r, index=bin_idxs, reduce="amin", include_self=False
@@ -542,7 +542,9 @@ class z_profile(Potential):
     Applies inner/outer z-profile constraint in symmetric oligomers.
     """
 
-    def __init__(self, contact_matrix, profile_csv, weight=1, verbose=True):
+    def __init__(
+        self, contact_matrix, profile_csv, cutoff=None, weight=1, verbose=True
+    ):
         """
         Parameters:
 
@@ -552,6 +554,9 @@ class z_profile(Potential):
             profile_csv (path):
                 path to the csv file containing profile data. The file should have 4 columns {z, rmin, rmean, rmax}
 
+            cutoff (float):
+                if passed, only deviations form the the target profile which are larger than `cutoff` are penalised.
+
             weight (int/float, optional): Scaling/weighting factor
 
             verbose (bool):
@@ -560,6 +565,7 @@ class z_profile(Potential):
         self.contact_matrix = contact_matrix
         self.weight = weight
         self.target_profile = self.read_profile(profile_csv)
+        self.cutoff = cutoff
         self.verbose = verbose
 
     @staticmethod
@@ -572,8 +578,11 @@ class z_profile(Potential):
     def compute(self, xyz):
         coords = xyz[:, 1].contiguous()
         current_profile = self.get_z_profile(coords, z=self.target_profile[:, 0])
-        idx = current_profile[:,1]>0
-        pot = -((current_profile[idx, 1:] - self.target_profile[idx, 1:]) ** 2).sum()
+        idx = current_profile[:, 1] > 0
+        deviations = (current_profile[idx, 1:] - self.target_profile[idx, 1:]) ** 2
+        if self.cutoff:
+            deviations = deviations[deviations > self.cutoff**2]
+        pot = -deviations.sum()
         if self.verbose:
             log.info(f"z_profile guiding potential: " f"potential={pot.item():.2g}")
         return self.weight * pot

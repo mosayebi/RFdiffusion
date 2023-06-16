@@ -360,7 +360,7 @@ class Denoise:
         px0_[~atom_mask] = float("nan")
         return torch.Tensor(px0_)
 
-    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=200.0):
+    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=250.0):
         """
         This could be moved into potential manager if desired - NRB
 
