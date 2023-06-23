@@ -555,7 +555,7 @@ class z_profile(Potential):
                 path to the csv file containing profile data. The file should have 4 columns {z, rmin, rmean, rmax}
 
             cutoff (float):
-                if passed, only deviations form the the target profile which are larger than `cutoff` are penalised.
+                if passed, only deviations from the the target profile which are larger than `cutoff` are penalised.
 
             weight (int/float, optional): Scaling/weighting factor
 
