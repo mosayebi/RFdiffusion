@@ -136,7 +136,7 @@ class PotentialManager:
         setting_dict = {entry.split(':')[0]:entry.split(':')[1] for entry in potstr.split(',')}
 
         for key in setting_dict:
-            if not key in ['type', 'profile_csv']: setting_dict[key] = float(setting_dict[key])
+            if not key in ['type', 'profile_csv']: setting_dict[key] = eval(setting_dict[key])
 
         return setting_dict
 
@@ -152,10 +152,8 @@ class PotentialManager:
             assert(potential_dict['type'] in potentials.implemented_potentials), f'potential with name: {potential_dict["type"]} is not one of the implemented potentials: {potentials.implemented_potentials.keys()}'
 
             kwargs = {k: potential_dict[k] for k in potential_dict.keys() - {'type'}}
-
             # symmetric oligomer contact potential args
             if self.inference_config.symmetry:
-
                 num_chains = calc_nchains(symbol=self.inference_config.symmetry, components=1) # hard code 1 for now 
                 contact_kwargs={'nchain':num_chains,
                                 'intra_all':self.potentials_config.olig_intra_all,
@@ -163,7 +161,8 @@ class PotentialManager:
                                 'contact_string':self.potentials_config.olig_custom_contact }
                 contact_matrix = make_contact_matrix(**contact_kwargs)
                 kwargs.update({'contact_matrix':contact_matrix})
-
+            elif potential_dict['type'] in ['hb_contacts', 'olig_contacts']:
+                kwargs.update({'contact_matrix':np.ones((1,1))})
             to_apply.append(potentials.implemented_potentials[potential_dict['type']](**kwargs))
 
         return to_apply
