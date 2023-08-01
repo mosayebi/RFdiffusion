@@ -372,13 +372,11 @@ class Denoise:
 
         Outputs:
 
-            Ca_grads (torch.tensor): [L,3] The gradient at each Ca atom
+            grads (torch.tensor): [L,27,3] The gradient at each atom
         """
 
         if self.potential_manager == None or self.potential_manager.is_empty():
-            return torch.zeros(xyz.shape[0], 3)
-
-        use_Cb = False
+            return torch.zeros(xyz.shape)
 
         # seq.requires_grad = True
         xyz.requires_grad = True
@@ -391,21 +389,21 @@ class Denoise:
 
         # Since we are not moving frames, Cb grads are same as Ca grads
         # Need access to calculated Cb coordinates to be able to get Cb grads though
-        Ca_grads = xyz.grad[:, 1, :]
+        grads = xyz.grad #[:, 1, :]
 
         if not diffusion_mask == None:
-            Ca_grads[diffusion_mask, :] = 0
+            grads[diffusion_mask, :] = 0
 
         # check for NaN's
-        if torch.isnan(Ca_grads).any():
+        if torch.isnan(grads).any():
             self._log.info("WARNING: NaN in potential gradients, replacing with zero grad.")
-            Ca_grads[:] = 0
+            grads.zero_()
 
-        self._log.info(f"\nguiding potential |grad|_max = {Ca_grads.abs().max().item()}.")
+        self._log.info(f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads.abs().max().item():.4g}.")
         if clip_grad:
-            Ca_grads.clamp_(min=-clip_grad, max=clip_grad)
+            grads.clamp_(min=-clip_grad, max=clip_grad)
 
-        return Ca_grads
+        return grads
 
     def get_next_pose(
         self,
@@ -416,6 +414,8 @@ class Denoise:
         fix_motif=True,
         align_motif=True,
         include_motif_sidechains=True,
+        only_guide_ca=True,
+        seq_in=None
     ):
         """
         Wrapper function to take px0, xt and t, and to produce xt-1
@@ -438,7 +438,6 @@ class Denoise:
 
             include_motif_sidechains (bool): Provide sidechains of the fixed motif to the model
         """
-
         get_allatom = ComputeAllAtomCoords().to(device=xt.device)
         L, n_atom = xt.shape[:2]
         assert (xt.shape[1] == 14) or (xt.shape[1] == 27)
@@ -459,7 +458,7 @@ class Denoise:
 
         # get the next set of CA coordinates
         noise_scale_ca = self.noise_schedule_ca(t)
-        _, ca_deltas = get_next_ca(
+        _, Ca_deltas = get_next_ca(
             xt,
             px0,
             t,
@@ -482,23 +481,44 @@ class Denoise:
             noise_scale=noise_scale_frame,
         )
 
+        frames_next = torch.from_numpy(frames_next)
+        fullatom_next = torch.full_like(xt, float("nan")).unsqueeze(0)
+
+
         # Apply gradient step from guiding potentials
         # This can be moved to below where the full atom representation is calculated to allow for potentials involving sidechains
-
-        grad_ca = self.get_potential_gradients(
-            xt.clone(), diffusion_mask=diffusion_mask
-        )
-
-        ca_deltas += self.potential_manager.get_guide_scale(t) * grad_ca
+        # self._log.info(f'px0.shape {px0.shape}')
+        # self._log.info(f'frames_next.shape {frames_next.shape}')
+        #self._log.info(f'px0[0,:4] {px0[0,:4]}')
+        grad = self.get_potential_gradients(
+            px0.clone(), diffusion_mask=diffusion_mask,
+        ) # xt.clone()
+        deltas = self.potential_manager.get_guide_scale(t) * grad
+        Ca_deltas = Ca_deltas + deltas[:, 1, :]
 
         # add the delta to the new frames
-        frames_next = torch.from_numpy(frames_next) + ca_deltas[:, None, :]  # translate
+        if only_guide_ca:
+            frames_next += Ca_deltas[:, None, :]  # translate all atoms
+            fullatom_next[:, :, :3] = frames_next[None]
+        else:
+            raise NotImplementedError
+            # translate and rotate all atoms
+            N_deltas = Ca_deltas + deltas[:, 0, :] # do we need to add Ca_deltas?
+            C_deltas = Ca_deltas + deltas[:, 2, :]
+            N  = frames_next[:,0,:].clone() + N_deltas
+            Ca = frames_next[:,1,:].clone() + Ca_deltas
+            C  = frames_next[:,2,:].clone() + C_deltas
+            # enforce an ideal backbone after adding detals
+            Rs, Ts = rigid_from_3_points(N[None], Ca[None], C[None], non_ideal=True)
+            Nideal = torch.tensor([-0.5272, 1.3593, 0.000], device=frames_next.device)
+            Cideal = torch.tensor([1.5233, 0.000, 0.000], device=frames_next.device)
+            N = torch.einsum("brij,j->bri", Rs, Nideal) + Ts
+            C = torch.einsum("brij,j->bri", Rs, Cideal) + Ts
+            Ca = Ts
+            fullatom_next[:, :, :3] = torch.stack([N,Ca, C], dim=2)
 
-        fullatom_next = torch.full_like(xt, float("nan")).unsqueeze(0)
-        fullatom_next[:, :, :3] = frames_next[None]
         # This is never used so just make it a fudged tensor - NRB
         torsions_next = torch.zeros(1, 1)
-
         if include_motif_sidechains:
             fullatom_next[:, diffusion_mask, :14] = xt[None, diffusion_mask]
 
