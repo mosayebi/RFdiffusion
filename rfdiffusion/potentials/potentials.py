@@ -3,6 +3,7 @@ import numpy as np
 from rfdiffusion.util import generate_Cbeta
 import logging
 import pandas as pd
+from rfdiffusion.inference.utils import rigid_from_3_points
 
 log = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ class Potential:
     Interface class that defines the functions a potential must implement
     """
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         """
         Given the current structure of the model prediction, return the current
         potential as a PyTorch tensor with a single entry
@@ -38,7 +39,7 @@ class monomer_ROG(Potential):
         self.weight = weight
         self.min_dist = min_dist
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         Ca = xyz[:, 1]  # [L,3]
 
         centroid = torch.mean(Ca, dim=0, keepdim=True)  # [1,3]
@@ -70,7 +71,7 @@ class binder_ROG(Potential):
         self.min_dist = min_dist
         self.weight = weight
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         # Only look at binder residues
         Ca = xyz[: self.binderlen, 1]  # [Lb,3]
 
@@ -104,7 +105,7 @@ class dimer_ROG(Potential):
         self.min_dist = min_dist
         self.weight = weight
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         # Only look at monomer 1 residues
         Ca_m1 = xyz[: self.binderlen, 1]  # [Lb,3]
 
@@ -156,7 +157,7 @@ class binder_ncontacts(Potential):
         self.weight = weight
         self.d_0 = d_0
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         # Only look at binder Ca residues
         Ca = xyz[: self.binderlen, 1]  # [Lb,3]
 
@@ -190,7 +191,7 @@ class interface_ncontacts(Potential):
         self.weight = weight
         self.d_0 = d_0
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         # Extract binder Ca residues
         Ca_b = xyz[: self.binderlen, 1]  # [Lb,3]
 
@@ -253,7 +254,7 @@ class olig_contacts(Potential):
     Author: DJ
     """
 
-    def __init__(self, contact_matrix, weight_intra=1, weight_inter=1, r_0=8, d_0=2):
+    def __init__(self, contact_matrix, weight_intra=1, weight_inter=1, r_0=8, d_0=2, verbose=True):
         """
         Parameters:
             chain_lengths (list, required): List of chain lengths, length is (Nchains)
@@ -270,6 +271,7 @@ class olig_contacts(Potential):
         self.weight_inter = weight_inter
         self.r_0 = r_0
         self.d_0 = d_0
+        self.verbose = verbose
 
         # check contact matrix only contains valid entries
         assert all(
@@ -292,14 +294,14 @@ class olig_contacts(Potential):
         Lchain = L // self.nchain
         return i * Lchain + torch.arange(Lchain)
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         """
         Iterate through the contact matrix, compute contact potentials between chains that need it,
         and negate contacts for any
         """
         L = xyz.shape[0]
 
-        all_contacts = 0
+        intra_contacts, inter_contacts = 0, 0
         start = 0
         for i in range(self.nchain):
             for j in range(self.nchain):
@@ -320,14 +322,19 @@ class olig_contacts(Potential):
                     denominator = torch.pow(divide_by_r_0, 12)
                     ncontacts = (1 - numerator) / (1 - denominator)
 
-                    # weight, don't double count intra
-                    scalar = (i == j) * self.weight_intra / 2 + (
-                        i != j
-                    ) * self.weight_inter
+                    if i==j:
+                        # weight, don't double count intra
+                        intra_contacts +=  ncontacts.sum() *  self.contact_matrix[i, j] / 2
+                    else:
+                        inter_contacts +=  ncontacts.sum() * self.contact_matrix[i, j]
 
-                    #                 contacts              attr/repuls          relative weights
-                    all_contacts += ncontacts.sum() * self.contact_matrix[i, j] * scalar
-
+        all_contacts = self.weight_intra*intra_contacts + self.weight_inter*inter_contacts
+        if self.verbose:
+            log.info(f"olig_contacts guiding potential: "
+                     f"intra_contacts={intra_contacts:.3g}, "
+                     f"inter_contacts={inter_contacts:.3g}, "
+                     f"potential={all_contacts:.3g}"
+            )
         return all_contacts
 
 
@@ -418,7 +425,7 @@ class substrate_contacts(Potential):
                 lambda dgram: poly_repulse(dgram, rep_r_0, rep_s, p=1.5)
             )
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         # First, get random set of atoms
         # This operates on self.xyz_motif, which is assigned to this class in the model runner (for horrible plumbing reasons)
         self._grab_motif_residues(self.xyz_motif)
@@ -575,7 +582,7 @@ class z_profile(Potential):
     def get_z_profile(self, coords, z=None, steps=100):
         return get_z_profile(coords, z=z, steps=steps)
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         coords = xyz[:, 1].contiguous()
         current_profile = self.get_z_profile(coords, z=self.target_profile[:, 0])
         idx = current_profile[:, 1] > 0
@@ -650,7 +657,7 @@ class Rgs(Potential):
     def get_Rgs(self, coords):
         return get_Rgs(coords, self.diagonalise)
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         Rgs = self.get_Rgs(xyz[:, 1].contiguous())
         pot = -sum(
             [(x - y) ** 2 for x, y in zip(Rgs, self.target_Rgs) if y is not None]
@@ -663,6 +670,125 @@ class Rgs(Potential):
                 f"potential={pot.item():.2g}"
             )
         return self.weight * pot
+
+
+
+def add_ideal_oxygen(xyz, non_ideal=False):
+    """
+    Adds an ideal backbone Oxygen if the corresponding coordinates in xyz has nan.
+    """
+    xyz_in = xyz.clone().float()
+    if xyz.ndim==3:
+        xyz_in = xyz_in.unsqueeze(0)
+
+    if xyz_in.shape[2] == 3:
+        # only N,Ca,C are given
+        xyz_in = torch.cat([xyz_in, torch.full_like(xyz_in[...,0:1,:], float("nan"))], dim=2)
+
+    mask = xyz_in[0, : , 3, :].isnan().any(-1)
+    if mask.sum()==0:
+        return xyz
+
+    log.info(mask)
+    log.info(xyz_in[0,0,:4])
+
+    Rs, Ts = rigid_from_3_points(xyz_in[:,mask, 0, :], xyz_in[:,mask, 1, :], xyz_in[:,mask, 2, :], non_ideal=non_ideal)
+
+    # ideal atom positions are listed in
+    # https://github.com/mosayebi/RFdiffusion/blob/main/rfdiffusion/chemical.py#L196
+    log.info('adding ideal oxygen(s)')
+    Oideal = torch.tensor([0.6303, 1.0574, 0.000], device=xyz_in.device)
+    xyz_in[:,mask, 3, :] = torch.einsum("brij,j->bri", Rs, Oideal) + Ts
+    return xyz_in.squeeze(0) if xyz.ndim==3 else xyz_in
+
+def get_bb_hbond_map(coords):
+    """
+    Parameters:
+        coords (torch.Tensor): (N, CA, C, O) coordinates with shape (num_residues, 4, 3)
+    Returns:
+        Returns backbone hbond map tensor using pydssp. shape is (num_residues, num_residues)
+        for more details see https://github.com/ShintaroMinami/PyDSSP
+    """
+    import pydssp
+    coords = add_ideal_oxygen(coords)
+    return pydssp.get_hbond_map(coords)
+
+
+class hb_contacts(Potential):
+    """
+    Applies a potential to maximise number of hydrogen bonds as found by pydssp
+    """
+
+    def __init__(self, contact_matrix, weight_total=1, weight_self=1, mode=0, verbose=True):
+        """
+        Parameters:
+            contact_matrix (torch.tensor/np.array, required):
+                square matrix of shape (Nchains,Nchains) whose (i,j) enry represents
+                attractive (1), repulsive (-1), or non-existent (0) contact potentials
+                between chains in the complex
+
+            weight_total (int/float, optional):
+                Scaling/weighting factor for all Hbonds
+
+            weight_self (int/float, optional):
+                Scaling/weighting factor for all Hbonds in a single chain
+
+            verbose (bool):
+                if True, informative messages are added to log.
+        """
+        self.contact_matrix = contact_matrix
+        self.weight_total = weight_total
+        self.weight_self = weight_self
+        self.verbose = verbose
+        self.mode = mode
+
+        # check contact matrix only contains valid entries
+        assert all(
+            [i in [-1, 0, 1] for i in contact_matrix.flatten()]
+        ), "Contact matrix must contain only 0, 1, or -1 in entries"
+        # assert the matrix is square and symmetric
+        shape = contact_matrix.shape
+        assert len(shape) == 2
+        assert shape[0] == shape[1]
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                assert contact_matrix[i, j] == contact_matrix[j, i]
+        self.nchain = shape[0]
+
+    def _get_idx(self, i, L):
+        """
+        Returns the zero-indexed indices of the residues in chain i
+        """
+        assert L % self.nchain == 0
+        Lchain = L // self.nchain
+        return i * Lchain + torch.arange(Lchain)
+
+    def _sum(self, tensor):
+        if self.mode == 0:
+            return tensor.sum()
+        elif self.mode == 1:
+            return (tensor[tensor>0]).sum()
+
+    def compute(self, xyz, **kwargs):
+        """
+        Iterate through the contact matrix, compute contact potentials between chains that need it,
+        and negate contacts for any
+        """
+        L = xyz.shape[0]
+        hb_self = sum([self._sum(get_bb_hbond_map(xyz[self._get_idx(i, L), :4].contiguous()))  for i in range(self.nchain)])
+        #log.info(f"{hb_self}")
+        hb_total = self._sum(get_bb_hbond_map(xyz[:,:4].contiguous()))
+        #log.info(f"{hb_total}")
+        #torch.save(xyz, 'xyz.pt')
+        pot = self.weight_self * hb_self + self.weight_total * hb_total
+        if self.verbose:
+            log.info(
+                f"hb_contacts guiding potential: mode={self.mode}, "
+                f"self_hb_contacts={hb_self.item():.3g}, "
+                f"total_hb_contacts={hb_total.item():.3g}, "
+                f"potential={pot.item():.3g}"
+            )
+        return pot
 
 
 # Dictionary of types of potentials indexed by name of potential. Used by PotentialManager.
@@ -679,6 +805,7 @@ implemented_potentials = {
     "substrate_contacts": substrate_contacts,
     "z_profile": z_profile,
     "Rgs": Rgs,
+    "hb_contacts": hb_contacts,
 }
 
 require_binderlen = {
