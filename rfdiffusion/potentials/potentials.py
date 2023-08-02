@@ -254,7 +254,9 @@ class olig_contacts(Potential):
     Author: DJ
     """
 
-    def __init__(self, contact_matrix, weight_intra=1, weight_inter=1, r_0=8, d_0=2, verbose=True):
+    def __init__(
+        self, contact_matrix, weight_intra=1, weight_inter=1, r_0=8, d_0=2, verbose=True
+    ):
         """
         Parameters:
             chain_lengths (list, required): List of chain lengths, length is (Nchains)
@@ -322,18 +324,23 @@ class olig_contacts(Potential):
                     denominator = torch.pow(divide_by_r_0, 12)
                     ncontacts = (1 - numerator) / (1 - denominator)
 
-                    if i==j:
+                    if i == j:
                         # weight, don't double count intra
-                        intra_contacts +=  ncontacts.sum() *  self.contact_matrix[i, j] / 2
+                        intra_contacts += (
+                            ncontacts.sum() * self.contact_matrix[i, j] / 2
+                        )
                     else:
-                        inter_contacts +=  ncontacts.sum() * self.contact_matrix[i, j]
+                        inter_contacts += ncontacts.sum() * self.contact_matrix[i, j]
 
-        all_contacts = self.weight_intra*intra_contacts + self.weight_inter*inter_contacts
+        all_contacts = (
+            self.weight_intra * intra_contacts + self.weight_inter * inter_contacts
+        )
         if self.verbose:
-            log.info(f"olig_contacts guiding potential: "
-                     f"intra_contacts={intra_contacts:.3g}, "
-                     f"inter_contacts={inter_contacts:.3g}, "
-                     f"potential={all_contacts:.3g}"
+            log.info(
+                f"olig_contacts guiding potential: "
+                f"intra_contacts={intra_contacts:.3g}, "
+                f"inter_contacts={inter_contacts:.3g}, "
+                f"potential={all_contacts:.3g}"
             )
         return all_contacts
 
@@ -672,34 +679,41 @@ class Rgs(Potential):
         return self.weight * pot
 
 
-
 def add_ideal_oxygen(xyz, non_ideal=False):
     """
     Adds an ideal backbone Oxygen if the corresponding coordinates in xyz has nan.
     """
     xyz_in = xyz.clone().float()
-    if xyz.ndim==3:
+    if xyz.ndim == 3:
         xyz_in = xyz_in.unsqueeze(0)
 
     if xyz_in.shape[2] == 3:
         # only N,Ca,C are given
-        xyz_in = torch.cat([xyz_in, torch.full_like(xyz_in[...,0:1,:], float("nan"))], dim=2)
+        xyz_in = torch.cat(
+            [xyz_in, torch.full_like(xyz_in[..., 0:1, :], float("nan"))], dim=2
+        )
 
-    mask = xyz_in[0, : , 3, :].isnan().any(-1)
-    if mask.sum()==0:
+    mask = xyz_in[0, :, 3, :].isnan().any(-1)
+    if mask.sum() == 0:
         return xyz
 
     log.info(mask)
-    log.info(xyz_in[0,0,:4])
+    log.info(xyz_in[0, 0, :4])
 
-    Rs, Ts = rigid_from_3_points(xyz_in[:,mask, 0, :], xyz_in[:,mask, 1, :], xyz_in[:,mask, 2, :], non_ideal=non_ideal)
+    Rs, Ts = rigid_from_3_points(
+        xyz_in[:, mask, 0, :],
+        xyz_in[:, mask, 1, :],
+        xyz_in[:, mask, 2, :],
+        non_ideal=non_ideal,
+    )
 
     # ideal atom positions are listed in
     # https://github.com/mosayebi/RFdiffusion/blob/main/rfdiffusion/chemical.py#L196
-    log.info('adding ideal oxygen(s)')
+    log.info("adding ideal oxygen(s)")
     Oideal = torch.tensor([0.6303, 1.0574, 0.000], device=xyz_in.device)
-    xyz_in[:,mask, 3, :] = torch.einsum("brij,j->bri", Rs, Oideal) + Ts
-    return xyz_in.squeeze(0) if xyz.ndim==3 else xyz_in
+    xyz_in[:, mask, 3, :] = torch.einsum("brij,j->bri", Rs, Oideal) + Ts
+    return xyz_in.squeeze(0) if xyz.ndim == 3 else xyz_in
+
 
 def get_bb_hbond_map(coords):
     """
@@ -709,7 +723,10 @@ def get_bb_hbond_map(coords):
         Returns backbone hbond map tensor using pydssp. shape is (num_residues, num_residues)
         for more details see https://github.com/ShintaroMinami/PyDSSP
     """
-    import pydssp
+    try:
+        import pydssp
+    except:
+        raise RuntimeError(f"'pydssp' cannot be imported! see https://github.com/ShintaroMinami/PyDSSP")
     coords = add_ideal_oxygen(coords)
     return pydssp.get_hbond_map(coords)
 
@@ -719,7 +736,9 @@ class hb_contacts(Potential):
     Applies a potential to maximise number of hydrogen bonds as found by pydssp
     """
 
-    def __init__(self, contact_matrix, weight_total=1, weight_self=1, mode=0, verbose=True):
+    def __init__(
+        self, contact_matrix, weight_intra=1, weight_inter=1, mode=0, verbose=True
+    ):
         """
         Parameters:
             contact_matrix (torch.tensor/np.array, required):
@@ -727,18 +746,18 @@ class hb_contacts(Potential):
                 attractive (1), repulsive (-1), or non-existent (0) contact potentials
                 between chains in the complex
 
-            weight_total (int/float, optional):
-                Scaling/weighting factor for all Hbonds
+            weight_intra (int/float, optional):
+                Scaling/weighting factor for intra Hbonds
 
-            weight_self (int/float, optional):
-                Scaling/weighting factor for all Hbonds in a single chain
+            weight_inter (int/float, optional):
+                Scaling/weighting factor for inter Hbonds
 
             verbose (bool):
                 if True, informative messages are added to log.
         """
         self.contact_matrix = contact_matrix
-        self.weight_total = weight_total
-        self.weight_self = weight_self
+        self.weight_intra = weight_intra
+        self.weight_inter = weight_inter
         self.verbose = verbose
         self.mode = mode
 
@@ -767,7 +786,7 @@ class hb_contacts(Potential):
         if self.mode == 0:
             return tensor.sum()
         elif self.mode == 1:
-            return (tensor[tensor>0]).sum()
+            return (tensor[tensor > 0]).sum()
 
     def compute(self, xyz, **kwargs):
         """
@@ -775,20 +794,42 @@ class hb_contacts(Potential):
         and negate contacts for any
         """
         L = xyz.shape[0]
-        hb_self = sum([self._sum(get_bb_hbond_map(xyz[self._get_idx(i, L), :4].contiguous()))  for i in range(self.nchain)])
-        #log.info(f"{hb_self}")
-        hb_total = self._sum(get_bb_hbond_map(xyz[:,:4].contiguous()))
-        #log.info(f"{hb_total}")
-        #torch.save(xyz, 'xyz.pt')
-        pot = self.weight_self * hb_self + self.weight_total * hb_total
+
+        hb_intra = sum(
+            [
+                self._sum(get_bb_hbond_map(xyz[self._get_idx(i, L), :4].contiguous()))
+                for i in range(self.nchain)
+            ]
+        )
+
+        hb_inter = sum(
+            [
+                self._sum(
+                    get_bb_hbond_map(
+                           torch.cat(
+                            [
+                                xyz[self._get_idx(i, L), :4].contiguous(),
+                                xyz[self._get_idx(j, L), :4].contiguous(),
+                            ],
+                            dim=0
+                        )
+                    )
+                )
+                for i in range(self.nchain)
+                for j in range(i + 1, self.nchain)
+                if i != j
+            ]
+        )
+
+        all_hb = self.weight_intra * hb_intra + self.weight_inter * hb_inter
         if self.verbose:
             log.info(
                 f"hb_contacts guiding potential: mode={self.mode}, "
-                f"self_hb_contacts={hb_self.item():.3g}, "
-                f"total_hb_contacts={hb_total.item():.3g}, "
-                f"potential={pot.item():.3g}"
+                f"intra_hb_contacts={hb_intra:.3g}, "
+                f"inter_hb_contacts={hb_inter:.3g}, "
+                f"potential={all_hb:.3g}"
             )
-        return pot
+        return all_hb
 
 
 # Dictionary of types of potentials indexed by name of potential. Used by PotentialManager.

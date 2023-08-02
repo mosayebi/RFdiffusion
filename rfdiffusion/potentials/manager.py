@@ -162,6 +162,7 @@ class PotentialManager:
                 contact_matrix = make_contact_matrix(**contact_kwargs)
                 kwargs.update({'contact_matrix':contact_matrix})
             elif potential_dict['type'] in ['hb_contacts', 'olig_contacts']:
+                raise RuntimeError(f"'{potential_dict['type']}' must be used in symmetric mode!")
                 kwargs.update({'contact_matrix':np.ones((1,1))})
             to_apply.append(potentials.implemented_potentials[potential_dict['type']](**kwargs))
 
