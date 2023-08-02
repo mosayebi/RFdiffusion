@@ -360,7 +360,7 @@ class Denoise:
         px0_[~atom_mask] = float("nan")
         return torch.Tensor(px0_)
 
-    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=250.0):
+    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=250.0, **kwargs):
         """
         This could be moved into potential manager if desired - NRB
 
@@ -384,7 +384,7 @@ class Denoise:
         if not xyz.grad is None:
             xyz.grad.zero_()
 
-        current_potential = self.potential_manager.compute_all_potentials(xyz)
+        current_potential = self.potential_manager.compute_all_potentials(xyz, **kwargs)
         current_potential.backward()
 
         # Since we are not moving frames, Cb grads are same as Ca grads
@@ -491,7 +491,7 @@ class Denoise:
         # self._log.info(f'frames_next.shape {frames_next.shape}')
         #self._log.info(f'px0[0,:4] {px0[0,:4]}')
         grad = self.get_potential_gradients(
-            px0.clone(), diffusion_mask=diffusion_mask,
+            px0.clone(), diffusion_mask=diffusion_mask, seq_in=seq_in
         ) # xt.clone()
         deltas = self.potential_manager.get_guide_scale(t) * grad
         Ca_deltas = Ca_deltas + deltas[:, 1, :]

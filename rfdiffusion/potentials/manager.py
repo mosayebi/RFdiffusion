@@ -1,6 +1,7 @@
 import torch
 from rfdiffusion.potentials import potentials as potentials
 import numpy as np 
+import sys
 
 import logging
 log = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class PotentialManager:
 
         self.potentials_to_apply = self.initialize_all_potentials(setting_list)
         self.T = diffuser_config.T
-        
+
     def is_empty(self):
         '''
             Check whether this instance of PotentialManager actually contains any potentials
@@ -168,12 +169,12 @@ class PotentialManager:
 
         return to_apply
 
-    def compute_all_potentials(self, xyz):
+    def compute_all_potentials(self, xyz, **kwargs):
         '''
             This is the money call. Take the current sequence and structure information and get the sum of all of the potentials that are being used
         '''
 
-        potential_list = [potential.compute(xyz) for potential in self.potentials_to_apply]
+        potential_list = [potential.compute(xyz, **kwargs) for potential in self.potentials_to_apply]
         potential_stack = torch.stack(potential_list, dim=0)
         log.info(f"potentail_stack={potential_stack.detach().numpy()}")
         return torch.sum(potential_stack, dim=0)

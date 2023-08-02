@@ -230,7 +230,7 @@ class monomer_contacts(Potential):
         self.d_0 = d_0
         self.eps = eps
 
-    def compute(self, xyz):
+    def compute(self, xyz, **kwargs):
         Ca = xyz[:, 1]  # [L,3]
 
         # cdist needs a batch dimension - NRB
@@ -337,7 +337,7 @@ class olig_contacts(Potential):
         )
         if self.verbose:
             log.info(
-                f"olig_contacts guiding potential: "
+                f"'olig_contacts' guiding potential: "
                 f"intra_contacts={intra_contacts:.3g}, "
                 f"inter_contacts={inter_contacts:.3g}, "
                 f"potential={all_contacts:.3g}"
@@ -598,7 +598,7 @@ class z_profile(Potential):
             deviations = deviations[deviations > self.cutoff**2]
         pot = -deviations.sum()
         if self.verbose:
-            log.info(f"z_profile guiding potential: " f"potential={pot.item():.2g}")
+            log.info(f"'z_profile' guiding potential: " f"potential={pot.item():.2g}")
         return self.weight * pot
 
 
@@ -671,7 +671,7 @@ class Rgs(Potential):
         )
         if self.verbose:
             log.info(
-                f"Rgs guiding potential: "
+                f"'Rgs' guiding potential: "
                 f"current_Rgs={[float(f'{x:.2f}') for x in Rgs.tolist()]}, "
                 f"target_Rgs={[float(f'{x:.2f}') if x is not None else x for x in self.target_Rgs]}, "
                 f"potential={pot.item():.2g}"
@@ -726,7 +726,9 @@ def get_bb_hbond_map(coords):
     try:
         import pydssp
     except:
-        raise RuntimeError(f"'pydssp' cannot be imported! see https://github.com/ShintaroMinami/PyDSSP")
+        raise RuntimeError(
+            f"'pydssp' cannot be imported! see https://github.com/ShintaroMinami/PyDSSP"
+        )
     coords = add_ideal_oxygen(coords)
     return pydssp.get_hbond_map(coords)
 
@@ -806,12 +808,12 @@ class hb_contacts(Potential):
             [
                 self._sum(
                     get_bb_hbond_map(
-                           torch.cat(
+                        torch.cat(
                             [
                                 xyz[self._get_idx(i, L), :4].contiguous(),
                                 xyz[self._get_idx(j, L), :4].contiguous(),
                             ],
-                            dim=0
+                            dim=0,
                         )
                     )
                 )
@@ -824,12 +826,189 @@ class hb_contacts(Potential):
         all_hb = self.weight_intra * hb_intra + self.weight_inter * hb_inter
         if self.verbose:
             log.info(
-                f"hb_contacts guiding potential: mode={self.mode}, "
+                f"'hb_contacts' guiding potential: mode={self.mode}, "
                 f"intra_hb_contacts={hb_intra:.3g}, "
                 f"inter_hb_contacts={hb_inter:.3g}, "
                 f"potential={all_hb:.3g}"
             )
         return all_hb
+
+
+from rfdiffusion.chemical import aa2long, num2aa
+
+
+def prep_madrax_input(xyz, seq_in):
+    # take glycines, except for motif region
+    seq = torch.where(
+        torch.argmax(seq_in, dim=-1) == 21, 7, torch.argmax(seq_in, dim=-1)
+    )  # 7 is glycine
+    idx_pdb = 1 + torch.arange(xyz.shape[0])
+    chain = "A"
+    natoms = xyz.shape[1]
+    assert natoms == 14 or natoms == 27
+    coords = []
+    atnames = []
+    ctr = 1
+    for i, s in enumerate(seq.squeeze()):
+        atms = aa2long[s]
+        # his prot hack
+        if s == 8 and torch.linalg.norm(xyz[i, 9, :] - xyz[i, 5, :]) < 1.7:
+            atms = (
+                " N  ",
+                " CA ",
+                " C  ",
+                " O  ",
+                " CB ",
+                " CG ",
+                " NE2",
+                " CD2",
+                " CE1",
+                " ND1",
+                None,
+                None,
+                None,
+                None,
+                " H  ",
+                " HA ",
+                "1HB ",
+                "2HB ",
+                " HD2",
+                " HE1",
+                " HD1",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )  # his_d
+        for j, atm_j in enumerate(atms):
+            if j < natoms and atm_j is not None:
+                atnames.append(f"{num2aa[s]}_{ctr}_{atm_j.replace(' ','')}_{chain}_0_0")
+                coords.append(xyz[i, j, :])
+        ctr += 1
+    atnames = [atnames]
+    coords = torch.stack(coords).unsqueeze(0)
+    return coords, atnames
+
+
+def get_madrax_energy(xyz, seq_in, FF=None):
+    from madrax import dataStructures
+    device = xyz.device
+    if FF is None:
+        from madrax.ForceField import ForceField  # the main MadraX module
+
+        FF = ForceField(device=device)
+    else:
+        FF.to(device)
+    coords, atnames = prep_madrax_input(xyz, seq_in)
+    info_tensors = dataStructures.create_info_tensors(atnames, device=device)
+    return FF(coords.to(device), info_tensors)
+
+
+class madrax_energy(Potential):
+    """
+    Applies a potential to minimise the madrax energy
+    see https://www.biorxiv.org/content/10.1101/2023.01.12.523724v1
+    """
+
+    def __init__(self, contact_matrix, weight_intra=1, weight_inter=1, verbose=True, device='cpu'):
+        """
+        Parameters:
+            contact_matrix (torch.tensor/np.array, required):
+                square matrix of shape (Nchains,Nchains) whose (i,j) enry represents
+                attractive (1), repulsive (-1), or non-existent (0) contact potentials
+                between chains in the complex
+
+            weight_intra (int/float, optional):
+                Scaling/weighting factor for intra Hbonds
+
+            weight_inter (int/float, optional):
+                Scaling/weighting factor for inter Hbonds
+
+            verbose (bool):
+                if True, informative messages are added to log.
+        """
+        from madrax.ForceField import ForceField
+
+        self.contact_matrix = contact_matrix
+        self.weight_intra = weight_intra
+        self.weight_inter = weight_inter
+        self.verbose = verbose
+        self.FF = ForceField(device)
+
+        # check contact matrix only contains valid entries
+        assert all(
+            [i in [-1, 0, 1] for i in contact_matrix.flatten()]
+        ), "Contact matrix must contain only 0, 1, or -1 in entries"
+        # assert the matrix is square and symmetric
+        shape = contact_matrix.shape
+        assert len(shape) == 2
+        assert shape[0] == shape[1]
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                assert contact_matrix[i, j] == contact_matrix[j, i]
+        self.nchain = shape[0]
+
+    def _get_idx(self, i, L):
+        """
+        Returns the zero-indexed indices of the residues in chain i
+        """
+        assert L % self.nchain == 0
+        Lchain = L // self.nchain
+        return i * Lchain + torch.arange(Lchain)
+
+    def compute(self, xyz, **kwargs):
+        """
+        Iterate through the contact matrix, compute contact potentials between chains that need it,
+        and negate contacts for any
+        """
+        L = xyz.shape[0]
+        seq_in = kwargs["seq_in"]
+        e_intra = sum(
+            [
+                get_madrax_energy(
+                    xyz[self._get_idx(i, L)].contiguous(),
+                    seq_in[self._get_idx(i, L)].contiguous(),
+                    FF=self.FF,
+                ).sum()
+                for i in range(self.nchain)
+            ]
+        )
+        e_inter = sum(
+            [
+                get_madrax_energy(
+                    torch.cat(
+                        [
+                            xyz[self._get_idx(i, L)].contiguous(),
+                            xyz[self._get_idx(j, L)].contiguous(),
+                        ],
+                        dim=0,
+                    ),
+                    torch.cat(
+                        [
+                            seq_in[self._get_idx(i, L)].contiguous(),
+                            seq_in[self._get_idx(j, L)].contiguous(),
+                        ],
+                        dim=0,
+                    ),
+                    FF=self.FF,
+                ).sum()
+                for i in range(self.nchain)
+                for j in range(i + 1, self.nchain)
+                if i != j
+            ]
+        )
+
+        all_e = -(self.weight_intra * e_intra + self.weight_inter * e_inter)
+        if self.verbose:
+            log.info(
+                f"'madrax_energy' guiding potential: "
+                f"intra_energy={e_intra:.3g}, "
+                f"inter_energy={e_inter:.3g}, "
+                f"potential={all_e:.3g}"
+            )
+        return all_e
 
 
 # Dictionary of types of potentials indexed by name of potential. Used by PotentialManager.
@@ -847,6 +1026,7 @@ implemented_potentials = {
     "z_profile": z_profile,
     "Rgs": Rgs,
     "hb_contacts": hb_contacts,
+    "madrax_energy": madrax_energy
 }
 
 require_binderlen = {

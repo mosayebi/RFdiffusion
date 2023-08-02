@@ -269,10 +269,8 @@ def cross_product_matrix(u):
 
 
 # writepdb
-def writepdb(
-    filename, atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None
-):
-    f = open(filename, "w")
+def get_pdb_str(atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None):
+    pdb_str = ""
     ctr = 1
     scpu = seq.cpu().squeeze()
     atomscpu = atoms.cpu().squeeze()
@@ -294,7 +292,7 @@ def writepdb(
         else:
             chain = chain_idx[i]
         if len(atomscpu.shape) == 2:
-            f.write(
+            pdb_str += (
                 "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
                 % (
                     "ATOM",
@@ -313,7 +311,7 @@ def writepdb(
             ctr += 1
         elif atomscpu.shape[1] == 3:
             for j, atm_j in enumerate([" N  ", " CA ", " C  "]):
-                f.write(
+                pdb_str += (
                     "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
                     % (
                         "ATOM",
@@ -332,7 +330,7 @@ def writepdb(
                 ctr += 1
         elif atomscpu.shape[1] == 4:
             for j, atm_j in enumerate([" N  ", " CA ", " C  ", " O  "]):
-                f.write(
+                pdb_str += (
                     "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
                     % (
                         "ATOM",
@@ -395,7 +393,7 @@ def writepdb(
                 if (
                     j < natoms and atm_j is not None
                 ):  # and not torch.isnan(atomscpu[i,j,:]).any()):
-                    f.write(
+                    pdb_str += (
                         "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
                         % (
                             "ATOM",
@@ -412,6 +410,14 @@ def writepdb(
                         )
                     )
                     ctr += 1
+    return pdb_str
+
+def writepdb(
+    filename, atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None
+):
+    pdb_str = get_pdb_str(atoms, seq, binderlen, idx_pdb, bfacts, chain_idx)
+    f = open(filename, "w")
+    f.write(pdb_str)
 
 
 # resolve tip atom indices
