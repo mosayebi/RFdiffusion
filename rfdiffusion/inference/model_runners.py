@@ -18,6 +18,8 @@ import os
 from rfdiffusion.model_input_logger import pickle_function_call
 import sys
 
+from rfdiffusion.util import writepdb
+
 SCRIPT_DIR=os.path.dirname(os.path.realpath(__file__))
 
 TOR_INDICES  = util.torsion_indices
@@ -630,7 +632,7 @@ class Sampler:
                 t=t,
                 diffusion_mask=self.mask_str.squeeze(),
                 align_motif=self.inf_conf.align_motif,
-                seq_in=None
+                seq_in=seq_t_1
             )
         else:
             x_t_1 = torch.clone(px0).to(x_t.device)
@@ -727,7 +729,7 @@ class SelfConditioning(Sampler):
                 diffusion_mask=self.mask_str.squeeze(),
                 align_motif=self.inf_conf.align_motif,
                 include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
-                seq_in=None
+                seq_in=seq_t_1
             )
             self._log.info(
                     f'Timestep {t}, input to next step: { seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}')
