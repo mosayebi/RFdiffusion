@@ -176,7 +176,7 @@ class PotentialManager:
 
         potential_list = [potential.compute(xyz, **kwargs) for potential in self.potentials_to_apply]
         potential_stack = torch.stack(potential_list, dim=0)
-        log.info(f"potentail_stack={potential_stack.detach().numpy()}")
+        log.info(f"potentail_stack={potential_stack.detach().cpu().numpy()}")
         return torch.sum(potential_stack, dim=0)
 
     def get_guide_scale(self, t):

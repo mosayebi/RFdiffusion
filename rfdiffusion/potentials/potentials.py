@@ -892,12 +892,13 @@ def prep_madrax_input(xyz, seq_in):
     return coords, atnames
 
 
-def get_madrax_energy(xyz, seq_in, FF=None):
+def get_madrax_energy(xyz, seq_in, FF=None, device="cpu"):
     from madrax import dataStructures
-    device = xyz.device
+
+    if device is None:
+        device = xyz.device
     if FF is None:
         from madrax.ForceField import ForceField  # the main MadraX module
-
         FF = ForceField(device=device)
     else:
         FF.to(device)
@@ -912,7 +913,14 @@ class madrax_energy(Potential):
     see https://www.biorxiv.org/content/10.1101/2023.01.12.523724v1
     """
 
-    def __init__(self, contact_matrix, weight_intra=1, weight_inter=1, verbose=True, device='cpu'):
+    def __init__(
+        self,
+        contact_matrix,
+        weight_intra=1,
+        weight_inter=1,
+        verbose=True,
+        device="cuda",
+    ):
         """
         Parameters:
             contact_matrix (torch.tensor/np.array, required):
@@ -934,8 +942,9 @@ class madrax_energy(Potential):
         self.contact_matrix = contact_matrix
         self.weight_intra = weight_intra
         self.weight_inter = weight_inter
+        self.device = device
         self.verbose = verbose
-        self.FF = ForceField(device)
+        self.FF = ForceField(self.device)
 
         # check contact matrix only contains valid entries
         assert all(
@@ -971,6 +980,7 @@ class madrax_energy(Potential):
                     xyz[self._get_idx(i, L)].contiguous(),
                     seq_in[self._get_idx(i, L)].contiguous(),
                     FF=self.FF,
+                    device=self.device,
                 ).sum()
                 for i in range(self.nchain)
             ]
@@ -993,6 +1003,7 @@ class madrax_energy(Potential):
                         dim=0,
                     ),
                     FF=self.FF,
+                    device=self.device,
                 ).sum()
                 for i in range(self.nchain)
                 for j in range(i + 1, self.nchain)
@@ -1026,7 +1037,7 @@ implemented_potentials = {
     "z_profile": z_profile,
     "Rgs": Rgs,
     "hb_contacts": hb_contacts,
-    "madrax_energy": madrax_energy
+    "madrax_energy": madrax_energy,
 }
 
 require_binderlen = {
