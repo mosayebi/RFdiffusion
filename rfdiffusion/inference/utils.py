@@ -221,8 +221,7 @@ def get_rigid_transform(A0, B0):
     Bm = B.mean(0, keepdim=True)
     A -= Am
     B -= Bm
-    C = A.T @ B
-    U, S, Vt = torch.linalg.svd(C)
+    U, S, Vt = torch.linalg.svd(A.T @ B)
     # ensure right handed coordinate system
     d = torch.eye(3, dtype=A0.dtype)
     d[-1, -1] = float(torch.sign(torch.linalg.det(Vt.T @ U.T)))
