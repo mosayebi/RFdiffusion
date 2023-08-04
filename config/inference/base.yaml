@@ -102,6 +102,7 @@ potentials:
   olig_intra_all : null
   olig_custom_contact : null
   substrate: null
+  only_guide_ca: True
 
 contig_settings:
   ref_idx: null

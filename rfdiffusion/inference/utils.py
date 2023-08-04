@@ -208,6 +208,34 @@ def get_noise_schedule(T, noiseT, noise1, schedule_type):
     return noise_schedules[schedule_type]
 
 
+def get_rigid_transform(A0, B0):
+    """Finds the best rigid body rotation and translation between A0 and B0
+    B0 = A0 @ R.T + t
+    A0 = (B0 - t) @ R
+
+    A0/B0 are coordinate tensors whose last dim contains x,y,z coordinates
+    """
+    A = A0.clone().reshape(-1, 3)
+    B = B0.clone().reshape(-1, 3)
+    Am = A.mean(0, keepdim=True)
+    Bm = B.mean(0, keepdim=True)
+    A -= Am
+    B -= Bm
+    C = A.T @ B
+    U, S, Vt = torch.linalg.svd(C)
+    # ensure right handed coordinate system
+    d = torch.eye(3, dtype=A0.dtype)
+    d[-1, -1] = float(torch.sign(torch.linalg.det(Vt.T @ U.T)))
+    R = Vt.T @ d @ U.T
+    return R, (-R @ Am.T + Bm.T).T
+
+def transform_single_frame(xyz_n, xyz_o):
+    """
+    Returns the new frame coordinates, assuming the new frame is obtained by a rigid transformation of the old frame.
+    """
+    R, t = get_rigid_transform(xyz_n, xyz_o)
+    return (xyz_o - t) @ R
+
 class Denoise:
     """
     Class for getting x(t-1) from predicted x0 and x(t)
@@ -389,17 +417,21 @@ class Denoise:
 
         # Since we are not moving frames, Cb grads are same as Ca grads
         # Need access to calculated Cb coordinates to be able to get Cb grads though
-        grads = xyz.grad #[:, 1, :]
+        grads = xyz.grad  # [:, 1, :]
 
         if not diffusion_mask == None:
             grads[diffusion_mask, :] = 0
 
         # check for NaN's
         if torch.isnan(grads).any():
-            self._log.info("WARNING: NaN in potential gradients, replacing with zero grad.")
+            self._log.info(
+                "WARNING: NaN in potential gradients, replacing with zero grad."
+            )
             grads.zero_()
 
-        self._log.info(f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads.abs().max().item():.4g}.")
+        self._log.info(
+            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads.abs().max().item():.4g}."
+        )
         if clip_grad:
             grads.clamp_(min=-clip_grad, max=clip_grad)
 
@@ -415,7 +447,7 @@ class Denoise:
         align_motif=True,
         include_motif_sidechains=True,
         only_guide_ca=True,
-        seq_in=None
+        seq_in=None,
     ):
         """
         Wrapper function to take px0, xt and t, and to produce xt-1
@@ -484,38 +516,33 @@ class Denoise:
         frames_next = torch.from_numpy(frames_next)
         fullatom_next = torch.full_like(xt, float("nan")).unsqueeze(0)
 
-
         # Apply gradient step from guiding potentials
         # This can be moved to below where the full atom representation is calculated to allow for potentials involving sidechains
         # self._log.info(f'px0.shape {px0.shape}')
         # self._log.info(f'frames_next.shape {frames_next.shape}')
-        #self._log.info(f'px0[0,:4] {px0[0,:4]}')
+        # self._log.info(f'px0[0,:4] {px0[0,:4]}')
         grad = self.get_potential_gradients(
             px0.clone(), diffusion_mask=diffusion_mask, seq_in=seq_in
-        ) # xt.clone()
+        )  # xt.clone()
         deltas = self.potential_manager.get_guide_scale(t) * grad
-        Ca_deltas = Ca_deltas + deltas[:, 1, :]
+        deltas[:, 1, :] += Ca_deltas
 
         # add the delta to the new frames
         if only_guide_ca:
-            frames_next += Ca_deltas[:, None, :]  # translate all atoms
+            Ca_deltas = deltas[:, 1, :]
+            frames_next += Ca_deltas[:, None, :]  # translate all atoms by delta_Ca
             fullatom_next[:, :, :3] = frames_next[None]
         else:
-            raise NotImplementedError
-            # translate and rotate all atoms
-            N_deltas = Ca_deltas + deltas[:, 0, :] # do we need to add Ca_deltas?
-            C_deltas = Ca_deltas + deltas[:, 2, :]
-            N  = frames_next[:,0,:].clone() + N_deltas
-            Ca = frames_next[:,1,:].clone() + Ca_deltas
-            C  = frames_next[:,2,:].clone() + C_deltas
-            # enforce an ideal backbone after adding detals
-            Rs, Ts = rigid_from_3_points(N[None], Ca[None], C[None], non_ideal=True)
-            Nideal = torch.tensor([-0.5272, 1.3593, 0.000], device=frames_next.device)
-            Cideal = torch.tensor([1.5233, 0.000, 0.000], device=frames_next.device)
-            N = torch.einsum("brij,j->bri", Rs, Nideal) + Ts
-            C = torch.einsum("brij,j->bri", Rs, Cideal) + Ts
-            Ca = Ts
-            fullatom_next[:, :, :3] = torch.stack([N,Ca, C], dim=2)
+            # TODO: change this to avoid the for-loop
+            frames_next = torch.stack(
+                [
+                    transform_single_frame(*x)
+                    for x in zip(
+                        frames_next[:, :3, :] + deltas[:, :3, :], frames_next[:, :3, :]
+                    )
+                ]
+            )
+            fullatom_next[:, :, :3] = frames_next[None]
 
         # This is never used so just make it a fudged tensor - NRB
         torsions_next = torch.zeros(1, 1)
@@ -542,14 +569,14 @@ def sampler_selector(conf: DictConfig):
 
 def parse_pdb(filename, **kwargs):
     """extract xyz coords for all heavy atoms"""
-    with open(filename,"r") as f:
-        lines=f.readlines()
+    with open(filename, "r") as f:
+        lines = f.readlines()
     return parse_pdb_lines(lines, **kwargs)
 
 
 def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     # indices of residues observed in the structure
-    res, pdb_idx = [],[]
+    res, pdb_idx = [], []
     for l in lines:
         if l[:4] == "ATOM" and l[12:16].strip() == "CA":
             res.append((l[22:26], l[17:20]))
@@ -573,16 +600,18 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
             " " + l[12:16].strip().ljust(3),
             l[17:20],
         )
-        if (chain,resNo) in pdb_idx:
+        if (chain, resNo) in pdb_idx:
             idx = pdb_idx.index((chain, resNo))
             # for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]]):
-            for i_atm, tgtatm in enumerate(
-                util.aa2long[util.aa2num[aa]][:14]
-                ):
+            for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]][:14]):
                 if (
                     tgtatm is not None and tgtatm.strip() == atom.strip()
-                    ):  # ignore whitespace
-                    xyz[idx, i_atm, :] = [float(l[30:38]), float(l[38:46]), float(l[46:54])]
+                ):  # ignore whitespace
+                    xyz[idx, i_atm, :] = [
+                        float(l[30:38]),
+                        float(l[38:46]),
+                        float(l[46:54]),
+                    ]
                     break
 
     # save atom mask
@@ -685,9 +714,12 @@ def get_idx0_hotspots(mappings, ppi_conf, binderlen):
 
             # sokrypton_fork
             if "receptor_con_ref_pdb_idx" in mappings:
-                (idx,idx0) = (mappings["receptor_con_ref_pdb_idx"],mappings["receptor_con_hal_idx0"])
+                (idx, idx0) = (
+                    mappings["receptor_con_ref_pdb_idx"],
+                    mappings["receptor_con_hal_idx0"],
+                )
             else:
-                (idx,idx0) = (mappings["con_ref_pdb_idx"],mappings["con_hal_idx0"])
+                (idx, idx0) = (mappings["con_ref_pdb_idx"], mappings["con_hal_idx0"])
             for i, res in enumerate(idx):
                 if res in hotspots:
                     hotspot_idx.append(idx0[i])
@@ -723,8 +755,8 @@ class BlockAdjacency:
              conf.scaffold_list as conf
              conf.inference.num_designs for sanity checking
         """
-       
-        self.conf=conf 
+
+        self.conf = conf
         # either list or path to .txt file with list of scaffolds
         if self.conf.scaffoldguided.scaffold_list is not None:
             if type(self.conf.scaffoldguided.scaffold_list) == list:
@@ -755,7 +787,10 @@ class BlockAdjacency:
                 int(str(self.conf.scaffoldguided.sampled_insertion).split("-")[1]),
             ]
         else:
-            self.sampled_insertion = [0, int(self.conf.scaffoldguided.sampled_insertion)]
+            self.sampled_insertion = [
+                0,
+                int(self.conf.scaffoldguided.sampled_insertion),
+            ]
 
         # maximum sampled insertion at N- and C-terminus
         if "-" in str(self.conf.scaffoldguided.sampled_N):
@@ -795,9 +830,15 @@ class BlockAdjacency:
 
         # whether to mask loops or not
         if not self.conf.scaffoldguided.mask_loops:
-            assert self.conf.scaffoldguided.sampled_N == 0, "can't add length if not masking loops"
-            assert self.conf.scaffoldguided.sampled_C == 0, "can't add lemgth if not masking loops"
-            assert self.conf.scaffoldguided.sampled_insertion == 0, "can't add length if not masking loops"
+            assert (
+                self.conf.scaffoldguided.sampled_N == 0
+            ), "can't add length if not masking loops"
+            assert (
+                self.conf.scaffoldguided.sampled_C == 0
+            ), "can't add lemgth if not masking loops"
+            assert (
+                self.conf.scaffoldguided.sampled_insertion == 0
+            ), "can't add length if not masking loops"
             self.mask_loops = False
         else:
             self.mask_loops = True
@@ -909,13 +950,13 @@ class BlockAdjacency:
         """
         Wrapper method for pulling an item from the list, and preparing ss and block adj features
         """
-        
+
         # Handle determinism. Useful for integration tests
         if self.conf.inference.deterministic:
             torch.manual_seed(self.num_completed)
             np.random.seed(self.num_completed)
             random.seed(self.num_completed)
-  
+
         if self.systematic:
             # reset if num designs > num_scaffolds
             if self.item_n >= len(self.scaffold_list):

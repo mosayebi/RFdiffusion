@@ -18,10 +18,7 @@ import os
 from rfdiffusion.model_input_logger import pickle_function_call
 import sys
 
-from rfdiffusion.util import writepdb
-
 SCRIPT_DIR=os.path.dirname(os.path.realpath(__file__))
-
 TOR_INDICES  = util.torsion_indices
 TOR_CAN_FLIP = util.torsion_can_flip
 REF_ANGLES   = util.reference_angles
@@ -37,13 +34,13 @@ class Sampler:
         """
         self.initialized = False
         self.initialize(conf)
-        
+
     def initialize(self, conf: DictConfig) -> None:
         """
         Initialize sampler.
         Args:
             conf: Configuration
-        
+
         - Selects appropriate model from input
         - Assembles Config from model checkpoint and command line overrides
 
@@ -146,7 +143,7 @@ class Sampler:
             self.symmetry = None
 
         self.allatom = ComputeAllAtomCoords().to(self.device)
-        
+
         if self.inf_conf.input_pdb is None:
             # set default pdb
             script_dir=os.path.dirname(os.path.realpath(__file__))
@@ -163,7 +160,7 @@ class Sampler:
             self.t_step_input = int(self.diffuser_conf.partial_T)
         else:
             self.t_step_input = int(self.diffuser_conf.T)
-        
+
     @property
     def T(self):
         '''
@@ -193,7 +190,7 @@ class Sampler:
         Actions:
             - Replaces all -model and -diffuser items
             - Throws a warning if there are items in -model and -diffuser that aren't in the checkpoint
-        
+
         This throws an error if there is a flag in the checkpoint 'config_dict' that isn't in the inference config.
         This should ensure that whenever a feature is added in the training setup, it is accounted for in the inference script.
 
@@ -211,7 +208,7 @@ class Sampler:
                     self._conf[cat][key] = self.ckpt['config_dict'][cat][key]
                 except:
                     pass
-        
+
         # add overrides back in again
         for override in overrides:
             if override.split(".")[0] in ['model','diffuser','preprocess']:
@@ -221,7 +218,7 @@ class Sampler:
 
     def load_model(self):
         """Create RosettaFold model from preloaded checkpoint."""
-        
+
         # Read input dimensions from checkpoint.
         self.d_t1d=self._conf.preprocess.d_t1d
         self.d_t2d=self._conf.preprocess.d_t2d
@@ -255,15 +252,15 @@ class Sampler:
     def sample_init(self, return_forward_trajectory=False):
         """
         Initial features to start the sampling process.
-        
+
         Modify signature and function body for different initialization
         based on the config.
-        
+
         Returns:
             xt: Starting positions with a portion of them randomly sampled.
             seq_t: Starting sequence with a portion of them set to unknown.
         """
-        
+
         #######################
         ### Parse input pdb ###
         #######################
@@ -280,7 +277,7 @@ class Sampler:
         self.mappings = self.contig_map.get_mappings()
         self.mask_seq = torch.from_numpy(self.contig_map.inpaint_seq)[None,:]
         self.mask_str = torch.from_numpy(self.contig_map.inpaint_str)[None,:]
-        self.binderlen =  len(self.contig_map.inpaint)     
+        self.binderlen =  len(self.contig_map.inpaint)
 
         ####################
         ### Get Hotspots ###
@@ -312,7 +309,7 @@ class Sampler:
 
         self.diffusion_mask = self.mask_str
         self.chain_idx=['A' if i < self.binderlen else 'B' for i in range(L_mapped)]
-        
+
         ####################################
         ### Generate initial coordinates ###
         ####################################
@@ -375,10 +372,10 @@ class Sampler:
 
         seq_t = torch.full((1,L_mapped), 21).squeeze() # 21 is the mask token
         seq_t[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
-        
+
         # Unmask sequence if desired
         if self._conf.contigmap.provide_seq is not None:
-            seq_t[self.mask_seq.squeeze()] = seq_orig[self.mask_seq.squeeze()] 
+            seq_t[self.mask_seq.squeeze()] = seq_orig[self.mask_seq.squeeze()]
 
         seq_t[~self.mask_seq.squeeze()] = 21
         seq_t    = torch.nn.functional.one_hot(seq_t, num_classes=22).float() # [L,22]
@@ -408,7 +405,7 @@ class Sampler:
         if self.symmetry is not None:
             xt, seq_t = self.symmetry.apply_symmetry(xt, seq_t)
         self._log.info(f'Sequence init: {seq2chars(torch.argmax(seq_t, dim=-1))}')
-        
+
         self.msa_prev = None
         self.pair_prev = None
         self.state_prev = None
@@ -436,17 +433,17 @@ class Sampler:
         return xt, seq_t
 
     def _preprocess(self, seq, xyz_t, t, repack=False):
-        
+
         """
         Function to prepare inputs to diffusion model
-        
-            seq (L,22) one-hot sequence 
+
+            seq (L,22) one-hot sequence
 
             msa_masked (1,1,L,48)
 
             msa_full (1,1,L,25)
-        
-            xyz_t (L,14,3) template crds (diffused) 
+
+            xyz_t (L,14,3) template crds (diffused)
 
             t1d (1,L,28) this is the t1d before tacking on the chi angles:
                 - seq + unknown/mask (21)
@@ -456,7 +453,7 @@ class Sampler:
                 - contacting residues: for ppi. Target residues in contact with binder (1)
                 - empty feature (legacy) (1)
                 - ss (H, E, L, MASK) (4)
-            
+
             t2d (1, L, L, 45)
                 - last plane is block adjacency
     """
@@ -485,7 +482,7 @@ class Sampler:
 
         ###########
         ### t1d ###
-        ########### 
+        ###########
 
         # Here we need to go from one hot with 22 classes to one hot with 21 classes (last plane is missing token)
         t1d = torch.zeros((1,1,L,21))
@@ -495,9 +492,9 @@ class Sampler:
             if seqt1d[idx,21] == 1:
                 seqt1d[idx,20] = 1
                 seqt1d[idx,21] = 0
-        
+
         t1d[:,:,:,:21] = seqt1d[None,None,:,:21]
-        
+
 
         # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
         timefeature = torch.zeros((L)).float()
@@ -506,7 +503,7 @@ class Sampler:
         timefeature = timefeature[None,None,...,None]
 
         t1d = torch.cat((t1d, timefeature), dim=-1).float()
-        
+
         #############
         ### xyz_t ###
         #############
@@ -522,8 +519,8 @@ class Sampler:
         ### t2d ###
         ###########
         t2d = xyz_to_t2d(xyz_t)
-        
-        ###########      
+
+        ###########
         ### idx ###
         ###########
         idx = torch.tensor(self.contig_map.rf)[None]
@@ -548,7 +545,7 @@ class Sampler:
         t1d = t1d.to(self.device)
         t2d = t2d.to(self.device)
         alpha_t = alpha_t.to(self.device)
-        
+
         ######################
         ### added_features ###
         ######################
@@ -570,7 +567,7 @@ class Sampler:
             t1d=torch.cat((t1d, torch.zeros_like(t1d[...,:1]), hotspot_tens[None,None,...,None].to(self.device)), dim=-1)
 
         return msa_masked, msa_full, seq[None], torch.squeeze(xyz_t, dim=0), idx, t1d, t2d, xyz_t, alpha_t
-        
+
     def sample_step(self, *, t, x_t, seq_init, final_step):
         '''Generate the next pose that the model should be supplied at timestep t-1.
 
@@ -579,7 +576,7 @@ class Sampler:
             seq_t (torch.tensor): (L,22) The sequence at the beginning of this timestep
             x_t (torch.tensor): (L,14,3) The residue positions at the beginning of this timestep
             seq_init (torch.tensor): (L,22) The initialized sequence used in updating the sequence.
-            
+
         Returns:
             px0: (L,14,3) The model's prediction of x0.
             x_t_1: (L,14,3) The updated positions of the next step.
@@ -616,14 +613,14 @@ class Sampler:
                                 return_infer=True,
                                 motif_mask=self.diffusion_mask.squeeze().to(self.device))
 
-        # prediction of X0 
+        # prediction of X0
         _, px0  = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
         px0    = px0.squeeze()[:,:14]
-        
+
         #####################
         ### Get next pose ###
         #####################
-        
+
         if t > final_step:
             seq_t_1 = nn.one_hot(seq_init,num_classes=22).to(self.device)
             x_t_1, px0 = self.denoiser.get_next_pose(
@@ -632,7 +629,8 @@ class Sampler:
                 t=t,
                 diffusion_mask=self.mask_str.squeeze(),
                 align_motif=self.inf_conf.align_motif,
-                seq_in=seq_t_1
+                only_guide_ca=self.potential_conf.only_guide_ca,
+                seq_in=seq_t_1,
             )
         else:
             x_t_1 = torch.clone(px0).to(x_t.device)
@@ -673,7 +671,7 @@ class SelfConditioning(Sampler):
         ##################################
         ######## Str Self Cond ###########
         ##################################
-        if (t < self.diffuser.T) and (t != self.diffuser_conf.partial_T):   
+        if (t < self.diffuser.T) and (t != self.diffuser_conf.partial_T):
             zeros = torch.zeros(B,1,L,24,3).float().to(xyz_t.device)
             xyz_t = torch.cat((self.prev_pred.unsqueeze(1),zeros), dim=-2) # [B,T,L,27,3]
             t2d_44   = xyz_to_t2d(xyz_t) # [B,T,L,L,44]
@@ -705,7 +703,7 @@ class SelfConditioning(Sampler):
                                 state_prev = None,
                                 t=torch.tensor(t),
                                 return_infer=True,
-                                motif_mask=self.diffusion_mask.squeeze().to(self.device))   
+                                motif_mask=self.diffusion_mask.squeeze().to(self.device))
 
             if self.symmetry is not None and self.inf_conf.symmetric_self_cond:
                 px0 = self.symmetrise_prev_pred(px0=px0,seq_in=seq_in, alpha=alpha)[:,:,:3]
@@ -715,7 +713,7 @@ class SelfConditioning(Sampler):
         # prediction of X0
         _, px0  = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
         px0    = px0.squeeze()[:,:14]
-        
+
         ###########################
         ### Generate Next Input ###
         ###########################
@@ -729,6 +727,7 @@ class SelfConditioning(Sampler):
                 diffusion_mask=self.mask_str.squeeze(),
                 align_motif=self.inf_conf.align_motif,
                 include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
+                only_guide_ca=self.potential_conf.only_guide_ca,
                 seq_in=seq_t_1
             )
             self._log.info(
@@ -756,7 +755,7 @@ class SelfConditioning(Sampler):
         return px0_sym
 
 class ScaffoldedSampler(SelfConditioning):
-    """ 
+    """
     Model Runner for Scaffold-Constrained diffusion
     """
     def __init__(self, conf: DictConfig):
@@ -809,9 +808,9 @@ class ScaffoldedSampler(SelfConditioning):
 
         ##############################
         ### Auto-contig generation ###
-        ##############################    
+        ##############################
 
-        if self.contig_conf.contigs is None: 
+        if self.contig_conf.contigs is None:
             # process target
             xT = torch.full((self.L, 27,3), np.nan)
             xT = get_init_xyz(xT[None,None]).squeeze()
@@ -839,7 +838,7 @@ class ScaffoldedSampler(SelfConditioning):
                 contig = []
                 for idx,i in enumerate(self.target_pdb['pdb_idx'][:-1]):
                     if idx==0:
-                        start=i[1]               
+                        start=i[1]
                     if i[1] + 1 != self.target_pdb['pdb_idx'][idx+1][1] or i[0] != self.target_pdb['pdb_idx'][idx+1][0]:
                         contig.append(f'{i[0]}{start}-{i[1]}/0 ')
                         start = self.target_pdb['pdb_idx'][idx+1][1]
@@ -882,18 +881,18 @@ class ScaffoldedSampler(SelfConditioning):
             assert L_mapped==self.adj.shape[0]
             diffusion_mask = self.mask_str
             self.diffusion_mask = diffusion_mask
-            
+
             xT = torch.full((1,1,L_mapped,27,3), np.nan)
             xT[:, :, contig_map.hal_idx0, ...] = xyz_27[contig_map.ref_idx0,...]
             xT = get_init_xyz(xT).squeeze()
             atom_mask = torch.full((L_mapped, 27), False)
             atom_mask[contig_map.hal_idx0] = mask_27[contig_map.ref_idx0]
- 
+
         ####################
         ### Get hotspots ###
         ####################
         self.hotspot_0idx=iu.get_idx0_hotspots(self.mappings, self.ppi_conf, self.binderlen)
-        
+
         #########################
         ### Set up potentials ###
         #########################
@@ -936,17 +935,17 @@ class ScaffoldedSampler(SelfConditioning):
 
         xT = torch.clone(fa_stack[-1].squeeze()[:,:14,:])
         return xT, seq_T
-    
+
     def _preprocess(self, seq, xyz_t, t):
         msa_masked, msa_full, seq, xyz_prev, idx_pdb, t1d, t2d, xyz_t, alpha_t = super()._preprocess(seq, xyz_t, t, repack=False)
-        
+
         ###################################
         ### Add Adj/Secondary Structure ###
         ###################################
 
         assert self.preprocess_conf.d_t1d == 28, "The checkpoint you're using hasn't been trained with sec-struc/block adjacency features"
         assert self.preprocess_conf.d_t2d == 47, "The checkpoint you're using hasn't been trained with sec-struc/block adjacency features"
-       
+
         #####################
         ### Handle Target ###
         #####################
@@ -961,7 +960,7 @@ class ScaffoldedSampler(SelfConditioning):
         t1d=torch.cat((t1d, full_ss[None,None].to(self.device)), dim=-1)
 
         t1d = t1d.float()
-        
+
         ###########
         ### t2d ###
         ###########
