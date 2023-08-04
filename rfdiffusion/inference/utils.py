@@ -389,54 +389,14 @@ class Denoise:
         px0_[~atom_mask] = float("nan")
         return torch.Tensor(px0_)
 
-    def get_potential_gradients(self, xyz, diffusion_mask, clip_grad=250.0, **kwargs):
+    def get_potential_gradients(self, xyz, diffusion_mask, **kwargs):
         """
-        This could be moved into potential manager if desired - NRB
-
         Function to take a structure (x) and get per-atom gradients used to guide diffusion update
-
-        Inputs:
-
-            xyz (torch.tensor, required): [L,27,3] Coordinates at which the gradient will be computed
-
-        Outputs:
-
-            grads (torch.tensor): [L,27,3] The gradient at each atom
         """
-
-        if self.potential_manager == None or self.potential_manager.is_empty():
+        if self.potential_manager == None:
             return torch.zeros(xyz.shape)
+        return self.potential_manager.get_potential_gradients(xyz, diffusion_mask, **kwargs)
 
-        # seq.requires_grad = True
-        xyz.requires_grad = True
-
-        if not xyz.grad is None:
-            xyz.grad.zero_()
-
-        current_potential = self.potential_manager.compute_all_potentials(xyz, **kwargs)
-        current_potential.backward()
-
-        # Since we are not moving frames, Cb grads are same as Ca grads
-        # Need access to calculated Cb coordinates to be able to get Cb grads though
-        grads = xyz.grad  # [:, 1, :]
-
-        if not diffusion_mask == None:
-            grads[diffusion_mask, :] = 0
-
-        # check for NaN's
-        if torch.isnan(grads).any():
-            self._log.info(
-                "WARNING: NaN in potential gradients, replacing with zero grad."
-            )
-            grads.zero_()
-
-        self._log.info(
-            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}."
-        )
-        if clip_grad:
-            grads.clamp_(min=-clip_grad, max=clip_grad)
-
-        return grads
 
     def get_next_pose(
         self,

@@ -76,7 +76,7 @@ diffuser:
   schedule_type: linear
   so3_type: igso3
   crd_scale: 0.25
-  partial_T: null    
+  partial_T: null
   so3_schedule_type: linear
   min_b: 1.5
   max_b: 2.5
@@ -103,6 +103,7 @@ potentials:
   olig_custom_contact : null
   substrate: null
   only_guide_ca: True
+  clip_grad: 250
 
 contig_settings:
   ref_idx: null

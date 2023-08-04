@@ -84,10 +84,10 @@ class PotentialManager:
         Author: NRB
     '''
 
-    def __init__(self, 
-                 potentials_config, 
-                 ppi_config, 
-                 diffuser_config, 
+    def __init__(self,
+                 potentials_config,
+                 ppi_config,
+                 diffuser_config,
                  inference_config,
                  hotspot_0idx,
                  binderlen,
@@ -99,15 +99,16 @@ class PotentialManager:
 
         self.guide_scale = potentials_config.guide_scale
         self.guide_decay = potentials_config.guide_decay
-    
-        if potentials_config.guiding_potentials is None: 
+        self.clip_grad = potentials_config.clip_grad
+
+        if potentials_config.guiding_potentials is None:
             setting_list = []
-        else: 
+        else:
             setting_list = [self.parse_potential_string(potstr) for potstr in potentials_config.guiding_potentials]
 
 
         # PPI potentials require knowledge about the binderlen which may be detected at runtime
-        # This is a mechanism to still allow this info to be used in potentials - NRB 
+        # This is a mechanism to still allow this info to be used in potentials - NRB
         if binderlen > 0:
             binderlen_update   = { 'binderlen': binderlen }
             hotspot_res_update = { 'hotspot_res': hotspot_0idx }
@@ -179,20 +180,63 @@ class PotentialManager:
         log.info(f"potentail_stack={potential_stack.detach().cpu().numpy()}")
         return torch.sum(potential_stack, dim=0)
 
+    def get_potential_gradients(self, xyz, diffusion_mask, **kwargs):
+        """
+        Function to take a structure (x) and get per-atom gradients used to guide diffusion update
+        Inputs:
+            xyz (torch.tensor, required): [L,27,3] Coordinates at which the gradient will be computed
+        Outputs:
+            grads (torch.tensor): [L,27,3] The gradient at each atom
+        """
+        if self.is_empty():
+            return torch.zeros(xyz.shape)
+
+        # seq.requires_grad = True
+        xyz.requires_grad = True
+
+        if not xyz.grad is None:
+            xyz.grad.zero_()
+
+        current_potential = self.compute_all_potentials(xyz, **kwargs)
+        current_potential.backward()
+
+        # Since we are not moving frames, Cb grads are same as Ca grads
+        # Need access to calculated Cb coordinates to be able to get Cb grads though
+        grads = xyz.grad  # [:, 1, :]
+
+        if not diffusion_mask == None:
+            grads[diffusion_mask, :] = 0
+
+        # check for NaN's
+        if torch.isnan(grads).any():
+            self._log.info(
+                "WARNING: NaN in potential gradients, replacing with zero grad."
+            )
+            grads.zero_()
+
+        self._log.info(
+            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}."
+        )
+        if self.clip_grad:
+            grads.clamp_(min=-self.clip_grad, max=self.clip_grad)
+
+        return grads
+
+
     def get_guide_scale(self, t):
         '''"
         Given a timestep and a decay type, get the appropriate scale factor to use for applying guiding potentials
-        
+
         Inputs:
-        
+
             t (int, required):          The current timestep
-        
+
         Output:
-        
+
             scale (int):                The scale factor to use for applying guiding potentials
-        
+
         '''
-        
+
         implemented_decay_types = {
                 'constant': lambda t: self.guide_scale,
                 # Linear interpolation with y2: 0, y1: guide_scale, x2: 0, x1: T, x: t
@@ -200,11 +244,8 @@ class PotentialManager:
                 'quadratic' : lambda t: t**2/self.T**2 * self.guide_scale,
                 'cubic' : lambda t: t**3/self.T**3 * self.guide_scale
         }
-        
+
         if self.guide_decay not in implemented_decay_types:
             sys.exit(f'decay_type must be one of {implemented_decay_types.keys()}. Received decay_type={self.guide_decay}. Exiting.')
-        
+
         return implemented_decay_types[self.guide_decay](t)
-
-
-        
