@@ -209,12 +209,12 @@ class PotentialManager:
 
         # check for NaN's
         if torch.isnan(grads).any():
-            self._log.info(
+            log.info(
                 "WARNING: NaN in potential gradients, replacing with zero grad."
             )
             grads.zero_()
 
-        self._log.info(
+        log.info(
             f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}."
         )
         if self.clip_grad:
