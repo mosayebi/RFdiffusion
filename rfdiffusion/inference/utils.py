@@ -228,12 +228,14 @@ def get_rigid_transform(A0, B0):
     R = Vt.T @ d @ U.T
     return R, (-R @ Am.T + Bm.T).T
 
+
 def transform_single_frame(xyz_n, xyz_o):
     """
     Returns the new frame coordinates, assuming the new frame is obtained by a rigid transformation of the old frame.
     """
     R, t = get_rigid_transform(xyz_n, xyz_o)
     return (xyz_o - t) @ R
+
 
 class Denoise:
     """
@@ -429,7 +431,7 @@ class Denoise:
             grads.zero_()
 
         self._log.info(
-            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads.abs().max().item():.4g}."
+            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}."
         )
         if clip_grad:
             grads.clamp_(min=-clip_grad, max=clip_grad)
