@@ -27,6 +27,7 @@ inference:
 contigmap:
   contigs: null
   inpaint_seq: null
+  inpaint_str: null
   provide_seq: null
   length: null
 
