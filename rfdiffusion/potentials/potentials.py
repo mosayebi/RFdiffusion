@@ -839,9 +839,13 @@ from rfdiffusion.chemical import aa2long, num2aa
 
 def prep_madrax_input(xyz, seq_in):
     # take glycines, except for motif region
-    seq = torch.where(
-        torch.argmax(seq_in, dim=-1) == 21, 7, torch.argmax(seq_in, dim=-1)
-    )  # 7 is glycine
+    if seq_in.ndim>1:
+        seq = torch.where(
+            torch.argmax(seq_in, dim=-1) == 21, 7, torch.argmax(seq_in, dim=-1)
+        )  # 7 is glycine
+    else:
+        seq = torch.where(seq_in == 21, 7, seq_in)  # 7 is glycine
+
     idx_pdb = 1 + torch.arange(xyz.shape[0])
     chain = "A"
     natoms = xyz.shape[1]
@@ -892,7 +896,7 @@ def prep_madrax_input(xyz, seq_in):
     return coords, atnames
 
 
-def get_madrax_energy(xyz, seq_in, FF=None, device="cpu"):
+def get_madrax_energy(xyz, seq_in, FF=None, device="cpu", clip=None):
     from madrax import dataStructures
 
     if device is None:
@@ -904,7 +908,10 @@ def get_madrax_energy(xyz, seq_in, FF=None, device="cpu"):
         FF.to(device)
     coords, atnames = prep_madrax_input(xyz, seq_in)
     info_tensors = dataStructures.create_info_tensors(atnames, device=device)
-    return FF(coords.to(device), info_tensors)
+    E = FF(coords.to(device), info_tensors)
+    if clip:
+        E.clamp_(min=-clip, max=clip)
+    return E
 
 
 class madrax_energy(Potential):
@@ -918,6 +925,7 @@ class madrax_energy(Potential):
         contact_matrix,
         weight_intra=1,
         weight_inter=1,
+        clip=None,
         verbose=True,
         device="cuda",
     ):
@@ -942,6 +950,7 @@ class madrax_energy(Potential):
         self.contact_matrix = contact_matrix
         self.weight_intra = weight_intra
         self.weight_inter = weight_inter
+        self.clip = clip
         self.device = device
         self.verbose = verbose
         self.FF = ForceField(self.device)
@@ -980,6 +989,7 @@ class madrax_energy(Potential):
                     xyz[self._get_idx(i, L)].contiguous(),
                     seq_in[self._get_idx(i, L)].contiguous(),
                     FF=self.FF,
+                    clip=self.clip,
                     device=self.device,
                 ).sum()
                 for i in range(self.nchain)
@@ -1003,6 +1013,7 @@ class madrax_energy(Potential):
                         dim=0,
                     ),
                     FF=self.FF,
+                    clip=self.clip,
                     device=self.device,
                 ).sum()
                 for i in range(self.nchain)
@@ -1014,7 +1025,7 @@ class madrax_energy(Potential):
         all_e = -(self.weight_intra * e_intra + self.weight_inter * e_inter)
         if self.verbose:
             log.info(
-                f"'madrax_energy' guiding potential: "
+                f"'madrax_energy' guiding potential: clip_value={self.clip}, "
                 f"intra_energy={e_intra:.3g}, "
                 f"inter_energy={e_inter:.3g}, "
                 f"potential={all_e:.3g}"

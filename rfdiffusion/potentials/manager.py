@@ -214,12 +214,11 @@ class PotentialManager:
             )
             grads.zero_()
 
-        log.info(
-            f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}."
-        )
+        msg = f"guiding potential |Ca_grad|_max={grads[:, 1, :].abs().max().item():.4g}, |grad|_max={grads[:, :3, :].abs().max().item():.4g}"
         if self.clip_grad:
+            msg += f', clip_value={self.clip_grad}'
             grads.clamp_(min=-self.clip_grad, max=self.clip_grad)
-
+        log.info(msg)
         return grads
 
 
