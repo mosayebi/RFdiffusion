@@ -160,7 +160,8 @@ def main(conf: HydraConfig) -> None:
             final_seq,
             sampler.binderlen,
             chain_idx=sampler.chain_idx,
-            bfacts=bfact_stack[0],   #sokrypton_fork
+            bfacts=bfacts,
+            idx_pdb=sampler.idx_pdb
         )
 
         # run metadata

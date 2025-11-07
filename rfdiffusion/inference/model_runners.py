@@ -14,6 +14,7 @@ import torch.nn.functional as nn
 from rfdiffusion import util
 from hydra.core.hydra_config import HydraConfig
 import os
+import string
 
 from rfdiffusion.model_input_logger import pickle_function_call
 import sys
@@ -150,6 +151,7 @@ class Sampler:
             self.inf_conf.input_pdb=os.path.join(script_dir, '../../examples/input_pdbs/1qys.pdb')
         self.target_feats = iu.process_target(self.inf_conf.input_pdb, parse_hetatom=True, center=False)
         self.chain_idx = None
+        self.idx_pdb = None
 
         ##############################
         ### Handle Partial Noising ###
@@ -277,7 +279,29 @@ class Sampler:
         self.mappings = self.contig_map.get_mappings()
         self.mask_seq = torch.from_numpy(self.contig_map.inpaint_seq)[None,:]
         self.mask_str = torch.from_numpy(self.contig_map.inpaint_str)[None,:]
-        self.binderlen =  len(self.contig_map.inpaint)
+        self.binderlen =  len(self.contig_map.inpaint)    
+        
+        #######################################
+        ### Resolve cyclic peptide indicies ###
+        #######################################
+        if self._conf.inference.cyclic:
+            if self._conf.inference.cyc_chains is None:
+                # default to all residues being cyclized
+                self.cyclic_reses = ~self.mask_str.to(self.device).squeeze()
+            else:
+                # use cyc_chains arg to determine cyclic_reses mask
+                assert type(self._conf.inference.cyc_chains) is str, 'cyc_chains arg must be string'
+                cyc_chains  = self._conf.inference.cyc_chains
+                cyc_chains  = [i.upper() for i in cyc_chains]
+                hal_idx     = self.contig_map.hal # the pdb indices of output, knowledge of different chains
+                is_cyclized = torch.zeros_like(self.mask_str).bool().to(self.device).squeeze() # initially empty
+
+                for ch in cyc_chains:
+                    ch_mask = torch.tensor([idx[0] == ch for idx in hal_idx]).bool()
+                    is_cyclized[ch_mask] = True # set this whole chain to be cyclic
+                self.cyclic_reses = is_cyclized
+        else:
+            self.cyclic_reses = torch.zeros_like(self.mask_str).bool().to(self.device).squeeze()
 
         ####################
         ### Get Hotspots ###
@@ -308,7 +332,41 @@ class Sampler:
         contig_map=self.contig_map
 
         self.diffusion_mask = self.mask_str
-        self.chain_idx=['A' if i < self.binderlen else 'B' for i in range(L_mapped)]
+        length_bound = self.contig_map.sampled_mask_length_bound.copy()
+
+        first_res = 0
+        self.chain_idx = []
+        self.idx_pdb = []
+        all_chains = {contig_ref[0] for contig_ref in self.contig_map.ref}
+        available_chains = sorted(list(set(string.ascii_letters) - all_chains))
+
+        # Iterate over each chain
+        for last_res in length_bound:
+            chain_ids = {contig_ref[0] for contig_ref in self.contig_map.ref[first_res: last_res]}
+            # If we are designing this chain, it will have a '-' in the contig map
+            # Renumber this chain from 1
+            if "_" in chain_ids:
+                self.idx_pdb += [idx + 1 for idx in range(last_res - first_res)]
+                chain_ids = chain_ids - {"_"}
+                # If there are no fixed residues that have a chain id, pick the first available letter
+                if not chain_ids:
+                    if not available_chains:
+                        raise ValueError(f"No available chains!  You are trying to design a new chain, and you have "
+                                         f"already used all upper- and lower-case chain ids (up to 52 chains): "
+                                         f"{','.join(all_chains)}.")
+                    chain_id = available_chains[0]
+                    available_chains.remove(chain_id)
+                # Otherwise, use the chain of the fixed (motif) residues
+                else:
+                    assert len(chain_ids) == 1, f"Error: Multiple chain IDs in chain: {chain_ids}"
+                    chain_id = list(chain_ids)[0]
+                self.chain_idx += [chain_id] * (last_res - first_res)
+            # If this is a fixed chain, maintain the chain and residue numbering
+            else:
+                self.idx_pdb += [contig_ref[1] for contig_ref in self.contig_map.ref[first_res: last_res]]
+                assert len(chain_ids) == 1, f"Error: Multiple chain IDs in chain: {chain_ids}"
+                self.chain_idx += [list(chain_ids)[0]] * (last_res - first_res)
+            first_res = last_res
 
         ####################################
         ### Generate initial coordinates ###
@@ -703,7 +761,8 @@ class SelfConditioning(Sampler):
                                 state_prev = None,
                                 t=torch.tensor(t),
                                 return_infer=True,
-                                motif_mask=self.diffusion_mask.squeeze().to(self.device))
+                                motif_mask=self.diffusion_mask.squeeze().to(self.device),
+                                cyclic_reses=self.cyclic_reses)   
 
             if self.symmetry is not None and self.inf_conf.symmetric_self_cond:
                 px0 = self.symmetrise_prev_pred(px0=px0,seq_in=seq_in, alpha=alpha)[:,:,:3]
@@ -771,7 +830,15 @@ class ScaffoldedSampler(SelfConditioning):
         """
         super().__init__(conf)
         # initialize BlockAdjacency sampling class
-        self.blockadjacency = iu.BlockAdjacency(conf, conf.inference.num_designs)
+        if conf.scaffoldguided.scaffold_dir is None:
+            assert any(x is not None for x in (conf.contigmap.inpaint_str_helix, conf.contigmap.inpaint_str_strand, conf.contigmap.inpaint_str_loop))
+            if conf.contigmap.inpaint_str_loop is not None:
+                assert conf.scaffoldguided.mask_loops == False, "You shouldn't be masking loops if you're specifying loop secondary structure"
+        else:
+            # initialize BlockAdjacency sampling class
+            assert all(x is None for x in (conf.contigmap.inpaint_str_helix, conf.contigmap.inpaint_str_strand, conf.contigmap.inpaint_str_loop)), "can't provide scaffold_dir if you're also specifying per-residue ss"
+            self.blockadjacency = iu.BlockAdjacency(conf.scaffoldguided, conf.inference.num_designs)
+
 
         #################################################
         ### Initialize target, if doing binder design ###
@@ -803,8 +870,11 @@ class ScaffoldedSampler(SelfConditioning):
         ##########################
         ### Process Fold Input ###
         ##########################
-        self.L, self.ss, self.adj = self.blockadjacency.get_scaffold()
-        self.adj = nn.one_hot(self.adj.long(), num_classes=3)
+        if hasattr(self, 'blockadjacency'):
+            self.L, self.ss, self.adj = self.blockadjacency.get_scaffold()
+            self.adj = nn.one_hot(self.adj.long(), num_classes=3)
+        else:
+            self.L=100 # shim. Get's overwritten
 
         ##############################
         ### Auto-contig generation ###
@@ -868,6 +938,7 @@ class ScaffoldedSampler(SelfConditioning):
             self.mask_seq = torch.from_numpy(self.contig_map.inpaint_seq)[None,:]
             self.mask_str = torch.from_numpy(self.contig_map.inpaint_str)[None,:]
             self.binderlen =  len(self.contig_map.inpaint)
+            self.L = len(self.contig_map.inpaint_seq)
             target_feats = self.target_feats
             contig_map = self.contig_map
 
@@ -878,7 +949,7 @@ class ScaffoldedSampler(SelfConditioning):
             seq_T=torch.full((L_mapped,),21)
             seq_T[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
             seq_T[~self.mask_seq.squeeze()] = 21
-            assert L_mapped==self.adj.shape[0]
+
             diffusion_mask = self.mask_str
             self.diffusion_mask = diffusion_mask
 
@@ -888,6 +959,12 @@ class ScaffoldedSampler(SelfConditioning):
             atom_mask = torch.full((L_mapped, 27), False)
             atom_mask[contig_map.hal_idx0] = mask_27[contig_map.ref_idx0]
 
+            if hasattr(self.contig_map, 'ss_spec'):
+                self.adj=torch.full((L_mapped, L_mapped),2) # masked
+                self.adj=nn.one_hot(self.adj.long(), num_classes=3)
+                self.ss=iu.ss_from_contig(self.contig_map.ss_spec)
+            assert L_mapped==self.adj.shape[0]
+            
         ####################
         ### Get hotspots ###
         ####################
